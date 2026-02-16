@@ -1,0 +1,257 @@
+# load in necessary libraries 
+library(depmap) 
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+
+# set path to dataset file
+prism <- read_csv("~/Downloads/secondary-screen-dose-response-curve-parameters.csv")
+
+expr_long <- depmap_TPM()
+
+# table 1: chemotherapy drug response ic50
+drug_ic50_table <- prism %>%
+  select(therapy = name, cell_line = ccle_name, ic50) %>%
+  select(therapy, where(~!all(is.na(.)))) %>%
+  filter(!if_all(-therapy, is.na))
+
+cell_ids <- unique(drug_ic50_table$cell_line)
+
+# table 2: gene rna expression values
+gene_expr_table <- expr_long %>%
+  filter(cell_line %in% cell_ids) %>%
+  select(gene, entrez_id, cell_line, rna_expression)
+
+# table 3: temozolomide ic50 values
+temozolomide_ic50_table <- drug_ic50_table %>%
+  filter(tolower(therapy) == "temozolomide") %>%
+  filter(!is.na(ic50)) %>%
+  select(cell_line, ic50)
+
+# order from high to low ic50
+temozolomide_ic50_table <- temozolomide_ic50_table %>%
+  arrange(desc(ic50)) %>%
+  mutate(cell_line = factor(cell_line, levels = cell_line))
+
+# line plot of raw ic50 values
+ggplot(temozolomide_ic50_table,
+       aes(x = cell_line, y = ic50, group = 1)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "red", size = 2) +
+  scale_y_log10() +
+  theme_minimal() +
+  labs(
+    title = "Temozolomide IC50 across cell lines",
+    x = "Cell line",
+    y = "IC50 (log10 µM)"
+  ) +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 8
+    )
+  )
+
+# creating a ranked graph from high to low (resistant to sensitive) cell lines based on ic50
+rank_tbl <- temozolomide_ic50_table %>%
+  filter(!is.na(ic50), ic50 > 0) %>%          # log scale needs > 0
+  arrange(desc(ic50)) %>%                      # high -> low (resistant -> sensitive)
+  mutate(
+    rank = row_number(),
+    log10_ic50 = log10(ic50)
+  )
+
+# setting threshold to define resistant vs sensitive cell lines
+threshold_tbl <- temozolomide_ic50_table %>%
+  mutate(
+    group = case_when(
+      ic50 >= quantile(ic50, 0.75, na.rm = TRUE) ~ "resistant",
+      ic50 <= quantile(ic50, 0.25, na.rm = TRUE) ~ "sensitive",
+      TRUE ~ "middle"
+    )
+  )
+
+table(threshold_tbl$group)
+
+# depmap ranked curve (log10 IC50)
+ggplot(rank_tbl, aes(x = rank, y = log10_ic50)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "red", size = 2) +
+  scale_x_continuous(
+    breaks = rank_tbl$rank,
+    labels = rank_tbl$cell_line
+  ) +
+  labs(
+    title = "Temozolomide IC50 Ranking Across Cell Lines",
+    x = "Cell lines",
+    y = "IC50 (log10 µM)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, size = 6, hjust = 1)
+  )
+
+# merge ic50 and gene expression datasets to check gene expression in temozolomide
+full_tmz_dataset <- gene_expr_table %>%
+  inner_join(temozolomide_ic50_table, by = "cell_line")
+
+# filter genes by creating threshold TPM > 1
+expr_threshold <- 1
+
+# filter by expression threshold
+filtered_data <- full_tmz_dataset %>%
+  filter(rna_expression > expr_threshold)
+
+# merging dataset of tmz ic50 with tmz ranking and gene expression
+tmz_meta <- threshold_tbl %>%
+  select(cell_line, ic50, group) %>%
+  filter(group != "middle")   # focus on extremes for clearer signal
+
+expr_tmz <- gene_expr_table %>%
+  inner_join(tmz_meta, by = "cell_line") %>%
+  filter(!is.na(rna_expression))
+
+expr_filtered <- expr_tmz %>%
+  filter(rna_expression > expr_threshold)
+
+# filter by standard deviation in rna expression
+gene_variability <- expr_filtered %>%
+  group_by(gene) %>%
+  summarise(
+    sd_expr = sd(rna_expression, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(is.finite(sd_expr))
+
+# set number of genes
+top_n <- 1000
+
+top_genes <- gene_variability %>%
+  arrange(desc(sd_expr)) %>%
+  slice_head(n = top_n) %>%
+  pull(gene)
+
+# add libraries to make heatmap for gene expression
+library(pheatmap)
+library(tibble)
+
+# make dataframe for heatmap
+heat_df <- expr_filtered %>%
+  filter(gene %in% top_genes) %>%
+  select(gene, cell_line, rna_expression) %>%
+  pivot_wider(
+    names_from = cell_line,
+    values_from = rna_expression,
+    values_fill = list(rna_expression = 0)
+  )
+
+# make matrix
+heat_mat <- heat_df %>%
+  column_to_rownames("gene") %>%
+  as.matrix()
+
+# log transform and clean up data
+heat_mat <- log10(heat_mat + 1)
+
+gene_sd <- apply(heat_mat, 1, sd, na.rm = TRUE)
+heat_mat <- heat_mat[
+  gene_sd > 0 & is.finite(gene_sd),
+  ,
+  drop = FALSE
+]
+
+heat_mat <- heat_mat[complete.cases(heat_mat), , drop = FALSE]
+
+# scale per gene
+heat_mat <- t(scale(t(heat_mat)))
+
+# annotate rows to align with heatmap columns
+anno_col <- tmz_meta %>%
+  select(cell_line, group) %>%
+  distinct() %>%
+  column_to_rownames("cell_line")
+
+anno_col <- anno_col[colnames(heat_mat), , drop = FALSE]
+
+# 7) plot heatmap
+pheatmap(
+  heat_mat,
+  annotation_col = anno_col,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_colnames = FALSE,
+  show_rownames = TRUE,      # ← show gene names
+  fontsize_row = 6,          # ← smaller text so it fits
+  border_color = NA,
+  main = paste0("Top ", top_n, " most variable expressed genes (TMZ)")
+)
+
+
+# ------- 1000 is messy, try lower?
+# set number of genes
+top_n <- 100
+
+top_genes <- gene_variability %>%
+  arrange(desc(sd_expr)) %>%
+  slice_head(n = top_n) %>%
+  pull(gene)
+
+# add libraries to make heatmap for gene expression
+library(pheatmap)
+library(tibble)
+
+# make dataframe for heatmap
+heat_df <- expr_filtered %>%
+  filter(gene %in% top_genes) %>%
+  select(gene, cell_line, rna_expression) %>%
+  pivot_wider(
+    names_from = cell_line,
+    values_from = rna_expression,
+    values_fill = list(rna_expression = 0)
+  )
+
+# make matrix
+heat_mat <- heat_df %>%
+  column_to_rownames("gene") %>%
+  as.matrix()
+
+# log transform and clean up data
+heat_mat <- log10(heat_mat + 1)
+
+gene_sd <- apply(heat_mat, 1, sd, na.rm = TRUE)
+heat_mat <- heat_mat[
+  gene_sd > 0 & is.finite(gene_sd),
+  ,
+  drop = FALSE
+]
+
+heat_mat <- heat_mat[complete.cases(heat_mat), , drop = FALSE]
+
+# scale per gene
+heat_mat <- t(scale(t(heat_mat)))
+
+# annotate rows to align with heatmap columns
+anno_col <- tmz_meta %>%
+  select(cell_line, group) %>%
+  distinct() %>%
+  column_to_rownames("cell_line")
+
+anno_col <- anno_col[colnames(heat_mat), , drop = FALSE]
+
+# 7) plot heatmap
+pheatmap(
+  heat_mat,
+  annotation_col = anno_col,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_colnames = FALSE,
+  show_rownames = TRUE,      # ← show gene names
+  fontsize_row = 6,          # ← smaller text so it fits
+  border_color = NA,
+  main = paste0("Top ", top_n, " most variable expressed genes (TMZ)")
+)
+
