@@ -1,5 +1,5 @@
-# load in necessary libraries 
-library(depmap) 
+# load in necessary libraries
+library(depmap)
 library(dplyr)
 library(tidyr)
 library(readr)
@@ -8,7 +8,6 @@ library(ggrepel)
 
 # set path to dataset file
 prism <- read_csv("~/Downloads/secondary-screen-dose-response-curve-parameters.csv")
-
 expr_long <- depmap_TPM()
 
 # table 1: chemotherapy drug response ic50
@@ -16,7 +15,6 @@ drug_ic50_table <- prism %>%
   select(therapy = name, cell_line = ccle_name, ic50) %>%
   select(therapy, where(~!all(is.na(.)))) %>%
   filter(!if_all(-therapy, is.na))
-
 cell_ids <- unique(drug_ic50_table$cell_line)
 
 # table 2: gene rna expression values
@@ -74,7 +72,6 @@ threshold_tbl <- temozolomide_ic50_table %>%
       TRUE ~ "middle"
     )
   )
-
 table(threshold_tbl$group)
 
 # depmap ranked curve (log10 IC50)
@@ -109,14 +106,16 @@ filtered_data <- full_tmz_dataset %>%
 # merging dataset of tmz ic50 with tmz ranking and gene expression
 tmz_meta <- threshold_tbl %>%
   select(cell_line, ic50, group) %>%
-  filter(group != "middle")   # focus on extremes for clearer signal
-
+  filter(group != "middle")   # focusing on extremes for clearer signal
 expr_tmz <- gene_expr_table %>%
   inner_join(tmz_meta, by = "cell_line") %>%
   filter(!is.na(rna_expression))
-
 expr_filtered <- expr_tmz %>%
   filter(rna_expression > expr_threshold)
+
+# make sure cell_line is character (prevents indexing errors)
+tmz_meta <- tmz_meta %>%
+  mutate(cell_line = as.character(cell_line))
 
 # filter by standard deviation in rna expression
 gene_variability <- expr_filtered %>%
@@ -127,21 +126,12 @@ gene_variability <- expr_filtered %>%
   ) %>%
   filter(is.finite(sd_expr))
 
-# set number of genes
-top_n <- 1000
-
-top_genes <- gene_variability %>%
-  arrange(desc(sd_expr)) %>%
-  slice_head(n = top_n) %>%
-  pull(gene)
-
 # add libraries to make heatmap for gene expression
 library(pheatmap)
 library(tibble)
 
 # make dataframe for heatmap
 heat_df <- expr_filtered %>%
-  filter(gene %in% top_genes) %>%
   select(gene, cell_line, rna_expression) %>%
   pivot_wider(
     names_from = cell_line,
@@ -156,14 +146,12 @@ heat_mat <- heat_df %>%
 
 # log transform and clean up data
 heat_mat <- log10(heat_mat + 1)
-
 gene_sd <- apply(heat_mat, 1, sd, na.rm = TRUE)
 heat_mat <- heat_mat[
   gene_sd > 0 & is.finite(gene_sd),
   ,
   drop = FALSE
 ]
-
 heat_mat <- heat_mat[complete.cases(heat_mat), , drop = FALSE]
 
 # scale per gene
@@ -177,81 +165,89 @@ anno_col <- tmz_meta %>%
 
 anno_col <- anno_col[colnames(heat_mat), , drop = FALSE]
 
-# 7) plot heatmap
+# order columns from most sensitive to most resistant
+ordered_cells <- tmz_meta %>%
+  arrange(ic50) %>%      # low IC50 = sensitive
+  pull(cell_line) %>%
+  as.character()
+
+ordered_cells <- ordered_cells[ordered_cells %in% colnames(heat_mat)]
+ordered_cells <- unique(ordered_cells)
+
+# reordering matrix and adding annotations
+heat_mat <- heat_mat[, ordered_cells, drop = FALSE]
+anno_col <- anno_col[ordered_cells, , drop = FALSE]
+
+# plot heatmap for all genes
 pheatmap(
   heat_mat,
   annotation_col = anno_col,
   cluster_rows = TRUE,
-  cluster_cols = TRUE,
-  show_colnames = FALSE,
-  show_rownames = TRUE,      # ← show gene names
-  fontsize_row = 6,          # ← smaller text so it fits
+  cluster_cols = FALSE,
+  show_colnames = TRUE,
+  fontsize_col = 6,
+  show_rownames = FALSE,
   border_color = NA,
-  main = paste0("Top ", top_n, " most variable expressed genes (TMZ)")
+  main = "Differentially expressed genes in TMZ"
+  
 )
 
+# ------ splitting into sensitive vs resistant ------
 
-# ------- 1000 is messy, try lower?
-# set number of genes
-top_n <- 100
+# get cell lines per group
+# sensitive
+sensitive_cells <- tmz_meta %>%
+  filter(group == "sensitive") %>%
+  pull(cell_line) %>%
+  as.character() %>%
+  unique()
 
-top_genes <- gene_variability %>%
-  arrange(desc(sd_expr)) %>%
-  slice_head(n = top_n) %>%
-  pull(gene)
+#resistant
+resistant_cells <- tmz_meta %>%
+  filter(group == "resistant") %>%
+  pull(cell_line) %>%
+  as.character() %>%
+  unique()
 
-# add libraries to make heatmap for gene expression
-library(pheatmap)
-library(tibble)
+# subset existing heatmap matrix
+heat_mat_sens <- heat_mat[, intersect(colnames(heat_mat), sensitive_cells), drop = FALSE]
+heat_mat_res  <- heat_mat[, intersect(colnames(heat_mat), resistant_cells), drop = FALSE]
 
-# make dataframe for heatmap
-heat_df <- expr_filtered %>%
-  filter(gene %in% top_genes) %>%
-  select(gene, cell_line, rna_expression) %>%
-  pivot_wider(
-    names_from = cell_line,
-    values_from = rna_expression,
-    values_fill = list(rna_expression = 0)
-  )
+# subset annotations
+anno_sens <- anno_col[colnames(heat_mat_sens), , drop = FALSE]
+anno_res  <- anno_col[colnames(heat_mat_res),  , drop = FALSE]
 
-# make matrix
-heat_mat <- heat_df %>%
-  column_to_rownames("gene") %>%
-  as.matrix()
+# scale per gene within each group
+heat_mat_sens <- t(scale(t(heat_mat_sens)))
+heat_mat_res  <- t(scale(t(heat_mat_res)))
 
-# log transform and clean up data
-heat_mat <- log10(heat_mat + 1)
+# remove genes that become NA after scaling
+heat_mat_sens <- heat_mat_sens[complete.cases(heat_mat_sens), , drop = FALSE]
+heat_mat_res  <- heat_mat_res[complete.cases(heat_mat_res),  , drop = FALSE]
 
-gene_sd <- apply(heat_mat, 1, sd, na.rm = TRUE)
-heat_mat <- heat_mat[
-  gene_sd > 0 & is.finite(gene_sd),
-  ,
-  drop = FALSE
-]
-
-heat_mat <- heat_mat[complete.cases(heat_mat), , drop = FALSE]
-
-# scale per gene
-heat_mat <- t(scale(t(heat_mat)))
-
-# annotate rows to align with heatmap columns
-anno_col <- tmz_meta %>%
-  select(cell_line, group) %>%
-  distinct() %>%
-  column_to_rownames("cell_line")
-
-anno_col <- anno_col[colnames(heat_mat), , drop = FALSE]
-
-# 7) plot heatmap
+# sensitive TMZ genes
 pheatmap(
-  heat_mat,
-  annotation_col = anno_col,
+  heat_mat_sens,
+  annotation_col = anno_sens,
   cluster_rows = TRUE,
   cluster_cols = TRUE,
-  show_colnames = FALSE,
-  show_rownames = TRUE,      # ← show gene names
-  fontsize_row = 6,          # ← smaller text so it fits
+  show_colnames = TRUE,
+  fontsize_col =  6,
+  show_rownames = FALSE,
   border_color = NA,
-  main = paste0("Top ", top_n, " most variable expressed genes (TMZ)")
+  main = "Differentially expressed genes in sensitive TMZ cell lines"
+)
+
+# resistant tmz genes
+pheatmap(
+  heat_mat_res,
+  annotation_col = anno_res,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_colnames = TRUE,
+  fontsize_col =  6,
+  show_rownames = FALSE,
+  border_color = NA,
+  main = "Differentially expressed genes in resistant TMZ cell lines"
 )
 
