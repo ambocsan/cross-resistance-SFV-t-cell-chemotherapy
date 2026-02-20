@@ -171,3 +171,85 @@ pheatmap(
   border_color = NA,
   main = "Differentially expressed genes in TMZ (EC50 groups)"
 )
+
+# ------ splitting into sensitive vs middle vs resistant ------
+
+# sensitive
+sensitive_cells <- tmz_meta %>%
+  filter(group == "sensitive") %>%
+  pull(cell_line) %>%
+  as.character() %>%
+  unique()
+
+# middle
+middle_cells <- tmz_meta %>%
+  filter(group == "middle") %>%
+  pull(cell_line) %>%
+  as.character() %>%
+  unique()
+
+# resistant
+resistant_cells <- tmz_meta %>%
+  filter(group == "resistant") %>%
+  pull(cell_line) %>%
+  as.character() %>%
+  unique()
+
+# subset existing heatmap matrix
+heat_mat_sens <- heat_mat[, intersect(colnames(heat_mat), sensitive_cells), drop = FALSE]
+heat_mat_mid  <- heat_mat[, intersect(colnames(heat_mat), middle_cells), drop = FALSE]
+heat_mat_res  <- heat_mat[, intersect(colnames(heat_mat), resistant_cells), drop = FALSE]
+
+# subset annotations
+anno_sens <- anno_col[colnames(heat_mat_sens), , drop = FALSE]
+anno_mid  <- anno_col[colnames(heat_mat_mid),  , drop = FALSE]
+anno_res  <- anno_col[colnames(heat_mat_res),  , drop = FALSE]
+
+# scale per gene within each group
+heat_mat_sens <- t(scale(t(heat_mat_sens)))
+heat_mat_mid  <- t(scale(t(heat_mat_mid)))
+heat_mat_res  <- t(scale(t(heat_mat_res)))
+
+# remove genes that become NA after scaling
+heat_mat_sens <- heat_mat_sens[complete.cases(heat_mat_sens), , drop = FALSE]
+heat_mat_mid  <- heat_mat_mid[complete.cases(heat_mat_mid),  , drop = FALSE]
+heat_mat_res  <- heat_mat_res[complete.cases(heat_mat_res),  , drop = FALSE]
+
+# sensitive TMZ genes
+pheatmap(
+  heat_mat_sens,
+  annotation_col = anno_sens,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_colnames = FALSE,
+  show_rownames = FALSE,
+  border_color = NA,
+  main = "Differentially expressed genes in sensitive TMZ cell lines (EC50)"
+)
+
+# middle TMZ genes
+pheatmap(
+  heat_mat_mid,
+  annotation_col = anno_mid,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_colnames = FALSE,
+  show_rownames = FALSE,
+  border_color = NA,
+  main = "Differentially expressed genes in intermediate TMZ cell lines (EC50)"
+)
+
+# resistant TMZ genes
+pheatmap(
+  heat_mat_res,
+  annotation_col = anno_res,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_colnames = FALSE,
+  show_rownames = FALSE,
+  border_color = NA,
+  main = "Differentially expressed genes in resistant TMZ cell lines (EC50)"
+)
+
+write_csv(drug_ec50_table, file = "drug_ec50.csv")
+write_csv(expr_long, file = "gene_expression.csv")
