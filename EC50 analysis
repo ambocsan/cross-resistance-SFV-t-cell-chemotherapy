@@ -16,7 +16,6 @@ library(pheatmap)
 prism <- read_csv("~/Downloads/secondary-screen-dose-response-curve-parameters.csv")
 
 # EC50 VALUES -----------------
-
 # table 1: chemotherapy drug response ec50
 drug_ec50_table <- prism %>%
   select(therapy = name, cell_line = ccle_name, ec50) %>%
@@ -55,16 +54,37 @@ rank_tbl <- temozolomide_ec50_table %>%
     log10_ec50 = log10(ec50)
   )
 
-# setting threshold to define resistant vs sensitive cell lines (INCLUDING middle)
-threshold_tbl <- temozolomide_ec50_table %>%
+# --- define exactly: 10 resistant, 20 middle, 10 sensitive ---
+n_res <- 10
+n_sens <- 10
+n_mid <- 20
+
+rank_tbl <- temozolomide_ec50_table %>%
+  filter(!is.na(ec50), ec50 > 0) %>%
+  arrange(desc(ec50)) %>%   # high = resistant
+  mutate(
+    rank = row_number(),
+    n_total = n(),
+    log10_ec50 = log10(ec50)
+  )
+
+mid_start <- floor((nrow(rank_tbl) - n_mid) / 2) + 1
+mid_end   <- mid_start + n_mid - 1
+
+tmz_meta <- rank_tbl %>%
   mutate(
     group = case_when(
-      ec50 >= quantile(ec50, 0.75, na.rm = TRUE) ~ "resistant",
-      ec50 <= quantile(ec50, 0.25, na.rm = TRUE) ~ "sensitive",
-      TRUE ~ "middle"
+      rank <= n_res ~ "resistant",
+      rank > (n_total - n_sens) ~ "sensitive",
+      rank >= mid_start & rank <= mid_end ~ "middle",
+      TRUE ~ NA_character_
     )
-  )
-table(threshold_tbl$group)
+  ) %>%
+  filter(!is.na(group)) %>%
+  select(cell_line, ec50, group) %>%
+  mutate(cell_line = as.character(cell_line))
+
+table(tmz_meta$group)
 
 # depmap ranked curve (log10 EC50)
 ggplot(rank_tbl, aes(x = rank, y = log10_ec50)) +
@@ -83,7 +103,7 @@ ggplot(rank_tbl, aes(x = rank, y = log10_ec50)) +
   theme(
     axis.text.x = element_text(angle = 90, size = 2, hjust = 1)
   )
-
+  
 # merge ec50 and gene expression datasets to check gene expression in temozolomide
 full_tmz_dataset <- gene_expr_table %>%
   inner_join(temozolomide_ec50_table, by = "cell_line")
@@ -94,11 +114,6 @@ expr_threshold <- 1
 # filter by expression threshold
 filtered_data <- full_tmz_dataset %>%
   filter(rna_expression > expr_threshold)
-
-# merging dataset of tmz ec50 with tmz ranking and gene expression (INCLUDING middle)
-tmz_meta <- threshold_tbl %>%
-  select(cell_line, ec50, group) %>%
-  mutate(cell_line = as.character(cell_line))
 
 expr_tmz <- gene_expr_table %>%
   inner_join(tmz_meta, by = "cell_line") %>%
@@ -222,7 +237,7 @@ pheatmap(
   heat_mat_sens,
   annotation_col = anno_sens,
   cluster_rows = TRUE,
-  cluster_cols = TRUE,
+  cluster_cols = FALSE,
   show_colnames = FALSE,
   show_rownames = FALSE,
   border_color = NA,
@@ -234,7 +249,7 @@ pheatmap(
   heat_mat_mid,
   annotation_col = anno_mid,
   cluster_rows = TRUE,
-  cluster_cols = TRUE,
+  cluster_cols = FALSE,
   show_colnames = FALSE,
   show_rownames = FALSE,
   border_color = NA,
@@ -246,12 +261,9 @@ pheatmap(
   heat_mat_res,
   annotation_col = anno_res,
   cluster_rows = TRUE,
-  cluster_cols = TRUE,
+  cluster_cols = FALSE,
   show_colnames = FALSE,
   show_rownames = FALSE,
   border_color = NA,
   main = "Differentially expressed genes in resistant TMZ cell lines (EC50)"
 )
-
-write_csv(drug_ec50_table, file = "drug_ec50.csv")
-write_csv(expr_long, file = "gene_expression.csv")
