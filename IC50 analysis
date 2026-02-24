@@ -1,0 +1,248 @@
+# load in necessary libraries
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("depmap", update = TRUE)
+
+library(depmap)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+
+# path to dataset file
+prism <- read_csv("~/Downloads/secondary-screen-dose-response-curve-parameters.csv")
+
+# IC50 VALUES -----------
+
+# table 1: chemotherapy drug response ic50
+drug_ic50_table <- prism %>%
+  select(therapy = name, cell_line = ccle_name, ic50) %>%
+  select(therapy, where(~ !all(is.na(.)))) %>%
+  filter(!if_all(-therapy, is.na))
+
+cell_ids <- unique(drug_ic50_table$cell_line)
+
+# table 2: gene rna expression values
+gene_expr_table <- expr_long %>%
+  filter(cell_line %in% cell_ids) %>%
+  select(gene, entrez_id, cell_line, rna_expression)
+
+# table 3: temozolomide ic50 values
+temozolomide_ic50_table <- drug_ic50_table %>%
+  filter(tolower(therapy) == "temozolomide") %>%
+  filter(!is.na(ic50), ic50 > 0) %>%
+  select(cell_line, ic50)
+
+# order from high to low ic50
+temozolomide_ic50_table <- temozolomide_ic50_table %>%
+  arrange(desc(ic50)) %>%
+  mutate(cell_line = factor(cell_line, levels = cell_line))
+
+# line plot of raw ic50 values
+ggplot(
+  temozolomide_ic50_table,
+  aes(x = cell_line, y = ic50, group = 1)
+) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "red", size = 2) +
+  scale_y_log10() +
+  theme_minimal() +
+  labs(
+    title = "Temozolomide IC50 across cell lines",
+    x = "Cell line",
+    y = "IC50 (log10 µM)"
+  ) +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 8
+    )
+  )
+
+# ranked graph from high to low (resistant to sensitive) based on ic50
+rank_tbl <- temozolomide_ic50_table %>%
+  filter(!is.na(ic50), ic50 > 0) %>%
+  arrange(desc(ic50)) %>%
+  mutate(
+    rank = row_number(),
+    log10_ic50 = log10(ic50)
+  )
+
+# threshold to define resistant vs sensitive cell lines
+threshold_tbl <- temozolomide_ic50_table %>%
+  mutate(
+    group = case_when(
+      ic50 >= quantile(ic50, 0.75, na.rm = TRUE) ~ "resistant",
+      ic50 <= quantile(ic50, 0.25, na.rm = TRUE) ~ "sensitive",
+      TRUE ~ "middle"
+    )
+  )
+
+table(threshold_tbl$group)
+
+# ranked curve (log10 IC50)
+ggplot(rank_tbl, aes(x = rank, y = log10_ic50)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "red", size = 2) +
+  scale_x_continuous(
+    breaks = rank_tbl$rank,
+    labels = rank_tbl$cell_line
+  ) +
+  labs(
+    title = "Temozolomide IC50 Ranking Across Cell Lines",
+    x = "Cell lines",
+    y = "IC50 (log10 µM)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, size = 6, hjust = 1)
+  )
+
+# merge ic50 and gene expression datasets
+full_tmz_dataset <- gene_expr_table %>%
+  inner_join(temozolomide_ic50_table, by = "cell_line")
+
+# threshold TPM > 1
+expr_threshold <- 1
+
+filtered_data <- full_tmz_dataset %>%
+  filter(rna_expression > expr_threshold)
+
+# merging dataset (extremes only, as in your original)
+tmz_meta <- threshold_tbl %>%
+  select(cell_line, ic50, group) %>%
+  filter(group != "middle") %>%
+  mutate(cell_line = as.character(cell_line))
+
+expr_tmz <- gene_expr_table %>%
+  inner_join(tmz_meta, by = "cell_line") %>%
+  filter(!is.na(rna_expression))
+
+expr_filtered <- expr_tmz %>%
+  filter(rna_expression > expr_threshold)
+
+# filter by standard deviation (computed but not used downstream; kept to match your style)
+gene_variability <- expr_filtered %>%
+  group_by(gene) %>%
+  summarise(
+    sd_expr = sd(rna_expression, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(is.finite(sd_expr))
+
+# ---- heatmap prep (tidyr 1.3.2 safe + no tibble helpers) ----
+heat_df <- expr_filtered %>%
+  select(gene, cell_line, rna_expression) %>%
+  pivot_wider(
+    names_from = cell_line,
+    values_from = rna_expression,
+    values_fill = 0
+  )
+
+# make matrix (base R rownames to avoid column_to_rownames)
+heat_mat <- as.data.frame(heat_df)
+rownames(heat_mat) <- heat_mat$gene
+heat_mat$gene <- NULL
+heat_mat <- as.matrix(heat_mat)
+
+# log transform and clean up
+heat_mat <- log10(heat_mat + 1)
+
+gene_sd <- apply(heat_mat, 1, sd, na.rm = TRUE)
+heat_mat <- heat_mat[gene_sd > 0 & is.finite(gene_sd), , drop = FALSE]
+heat_mat <- heat_mat[complete.cases(heat_mat), , drop = FALSE]
+
+# scale per gene
+heat_mat <- t(scale(t(heat_mat)))
+
+# annotation (base R rownames)
+anno_col <- tmz_meta %>%
+  select(cell_line, group) %>%
+  distinct() %>%
+  filter(!is.na(cell_line), cell_line != "")
+
+anno_col <- as.data.frame(anno_col)
+rownames(anno_col) <- anno_col$cell_line
+anno_col$cell_line <- NULL
+
+anno_col <- anno_col[colnames(heat_mat), , drop = FALSE]
+
+# order columns from most sensitive to most resistant
+ordered_cells <- tmz_meta %>%
+  arrange(ic50) %>%
+  pull(cell_line) %>%
+  as.character()
+
+ordered_cells <- ordered_cells[ordered_cells %in% colnames(heat_mat)]
+ordered_cells <- unique(ordered_cells)
+
+heat_mat <- heat_mat[, ordered_cells, drop = FALSE]
+anno_col <- anno_col[ordered_cells, , drop = FALSE]
+
+# plot heatmap for all genes
+pheatmap(
+  heat_mat,
+  annotation_col = anno_col,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_colnames = TRUE,
+  fontsize_col = 6,
+  show_rownames = FALSE,
+  border_color = NA,
+  main = "Differentially expressed genes in TMZ"
+)
+
+# ------ splitting into sensitive vs resistant ------
+sensitive_cells <- tmz_meta %>%
+  filter(group == "sensitive") %>%
+  pull(cell_line) %>%
+  as.character() %>%
+  unique()
+
+resistant_cells <- tmz_meta %>%
+  filter(group == "resistant") %>%
+  pull(cell_line) %>%
+  as.character() %>%
+  unique()
+
+heat_mat_sens <- heat_mat[, intersect(colnames(heat_mat), sensitive_cells), drop = FALSE]
+heat_mat_res  <- heat_mat[, intersect(colnames(heat_mat), resistant_cells), drop = FALSE]
+
+anno_sens <- anno_col[colnames(heat_mat_sens), , drop = FALSE]
+anno_res  <- anno_col[colnames(heat_mat_res),  , drop = FALSE]
+
+heat_mat_sens <- t(scale(t(heat_mat_sens)))
+heat_mat_res  <- t(scale(t(heat_mat_res)))
+
+heat_mat_sens <- heat_mat_sens[complete.cases(heat_mat_sens), , drop = FALSE]
+heat_mat_res  <- heat_mat_res[complete.cases(heat_mat_res),  , drop = FALSE]
+
+pheatmap(
+  heat_mat_sens,
+  annotation_col = anno_sens,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_colnames = TRUE,
+  fontsize_col = 6,
+  show_rownames = FALSE,
+  border_color = NA,
+  main = "Differentially expressed genes in sensitive TMZ cell lines"
+)
+
+pheatmap(
+  heat_mat_res,
+  annotation_col = anno_res,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_colnames = TRUE,
+  fontsize_col = 6,
+  show_rownames = FALSE,
+  border_color = NA,
+  main = "Differentially expressed genes in resistant TMZ cell lines"
+)
+
