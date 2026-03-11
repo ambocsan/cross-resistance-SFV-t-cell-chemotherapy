@@ -538,7 +538,6 @@ resistance_genes <- ic50_stats %>%
 sens_mat <- heat_mat_ic50[rownames(heat_mat_ic50) %in% sensitivity_genes, ]
 res_mat  <- heat_mat_ic50[rownames(heat_mat_ic50) %in% resistance_genes, ]
 
-
 # heatmaps
 pheatmap(
   sens_mat,
