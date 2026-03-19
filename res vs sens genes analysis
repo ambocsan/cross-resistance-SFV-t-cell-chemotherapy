@@ -1,0 +1,101 @@
+# libraries
+library(depmap)
+library(dplyr)
+library(tidyr)
+library(readr)
+
+# data
+prism <- read_csv("~/Downloads/secondary-screen-dose-response-curve-parameters.csv")
+
+# ic50 table
+drug_ic50_table <- prism %>%
+  select(therapy = name, cell_line = ccle_name, ic50) %>%
+  filter(!is.na(ic50), ic50 > 0)
+
+# tmz ic50
+tmz_ic50 <- drug_ic50_table %>%
+  filter(tolower(therapy) == "temozolomide") %>%
+  select(cell_line, ic50)
+
+# define groups using quartiles
+threshold_tbl <- tmz_ic50 %>%
+  mutate(
+    group = case_when(
+      ic50 >= quantile(ic50, 0.75, na.rm = TRUE) ~ "resistant",
+      ic50 <= quantile(ic50, 0.25, na.rm = TRUE) ~ "sensitive",
+      TRUE ~ "middle"
+    )
+  )
+
+# gene expression
+expr_long <- depmap_TPM() %>%
+  transmute(
+    gene = gene_name,
+    entrez_id = entrez_id,
+    cell_line = cell_line,
+    rna_expression = rna_expression
+  )
+
+# keep only relevant cell lines
+gene_expr_table <- expr_long %>%
+  filter(cell_line %in% threshold_tbl$cell_line)
+
+# merge tmz ic50 and expression
+ic50_expr <- gene_expr_table %>%
+  inner_join(threshold_tbl, by = "cell_line") %>%
+  filter(!is.na(rna_expression), !is.na(ic50))
+
+# filter out low expression genes
+expr_threshold <- 1
+
+ic50_expr <- ic50_expr %>%
+  filter(rna_expression > expr_threshold)
+
+# set middle as baseline
+middle_baseline <- ic50_expr %>%
+  filter(group == "middle") %>%
+  group_by(gene) %>%
+  summarise(
+    middle_expr = median(rna_expression, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# score sensitive against middle
+sens_dataset <- ic50_expr %>%
+  filter(group %in% c("sensitive", "middle"))
+
+sens_scores <- sens_dataset %>%
+  inner_join(middle_baseline, by = "gene") %>%
+  mutate(
+    score = rna_expression - middle_expr
+  )
+
+sens_gene_scores <- sens_scores %>%
+  group_by(gene, entrez_id) %>%
+  summarise(
+    score = median(score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(score))
+
+# score resistant against middle
+res_dataset <- ic50_expr %>%
+  filter(group %in% c("resistant", "middle"))
+
+res_scores <- res_dataset %>%
+  inner_join(middle_baseline, by = "gene") %>%
+  mutate(
+    score = rna_expression - middle_expr
+  )
+
+res_gene_scores <- res_scores %>%
+  group_by(gene, entrez_id) %>%
+  summarise(
+    score = median(score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(score))
+
+# save tables
+write_csv(sens_gene_scores, "tmz_ic50_sensitive_scores.csv")
+write_csv(res_gene_scores, "tmz_ic50_resistant_scores.csv")
