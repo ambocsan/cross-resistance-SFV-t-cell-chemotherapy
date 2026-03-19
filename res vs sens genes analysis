@@ -4,8 +4,11 @@ library(dplyr)
 library(tidyr)
 library(readr)
 
-# data
+# path to dataset file
+# macbook
 prism <- read_csv("~/Downloads/secondary-screen-dose-response-curve-parameters.csv")
+# windows
+prism <- read_csv("C:\Users\P324068\Downloads\secondary-screen-dose-response-curve-parameters.csv")
 
 # ic50 table
 drug_ic50_table <- prism %>%
