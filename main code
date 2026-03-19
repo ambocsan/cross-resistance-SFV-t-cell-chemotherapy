@@ -13,7 +13,10 @@ library(ggrepel)
 library(pheatmap)
 
 # path to dataset file
+# macbook
 prism <- read_csv("~/Downloads/secondary-screen-dose-response-curve-parameters.csv")
+# windows
+prism <- read_csv("C:\Users\P324068\Downloads\secondary-screen-dose-response-curve-parameters.csv")
 
 # ic50 VALUES -----------
 # table 1: chemotherapy drug response ic50
