@@ -1,8 +1,10 @@
-# load in necessary libraries
-if (!requireNamespace("BiocManager", quietly = TRUE))
-  install.packages("BiocManager")
+# This code is used to look at the gene expression for several chemotherapies (temozolomide, cisplatin, carboplatin, cylophosphomide,
+# vincristine, doxorubicin (adriamycin), etoposide, topotecan, and busulfan. Each can be done separately by replacing "temozolomide" with the
+# given drug in the code. IC50 values are used for the gene expression analysis to generate heatmaps for sensitive and resistance genes, as
+# well as pathway enrichment analysis. A PCA plot is done to compare the difference in senstivive vs resistance genes across different chemotherapies.
 
-BiocManager::install("depmap", force = TRUE)
+
+
 
 library(depmap)
 library(dplyr)
@@ -13,10 +15,7 @@ library(ggrepel)
 library(pheatmap)
 
 # path to dataset file
-# macbook
 prism <- read_csv("~/Downloads/secondary-screen-dose-response-curve-parameters.csv")
-# windows
-prism <- read_csv("C:\Users\P324068\Downloads\secondary-screen-dose-response-curve-parameters.csv")
 
 # ic50 VALUES -----------
 # table 1: chemotherapy drug response ic50
@@ -267,7 +266,7 @@ ggplot(rank_tbl, aes(x = rank, y = log10_ec50)) +
   theme(
     axis.text.x = element_text(angle = 90, size = 2, hjust = 1)
   )
-  
+
 # merge ec50 and gene expression datasets to check gene expression in temozolomide
 full_tmz_dataset <- gene_expr_table %>%
   inner_join(temozolomide_ec50_table, by = "cell_line")
@@ -400,7 +399,7 @@ anno_ic50 <- as.data.frame(anno_ic50)
 rownames(anno_ic50) <- anno_ic50$cell_line
 anno_ic50$cell_line <- NULL
 
-# top100 ic50 genes heatmap (ONLY chosen lines)
+# top100 ic50 genes heatmap
 heat_long_ic50 <- ic50_expr %>%
   filter(gene %in% top100_ic50_genes) %>%
   select(gene, cell_line, rna_expression) %>%
@@ -450,7 +449,6 @@ pheatmap(
 # -------
 # eC50 top100 heatmap + sensitive/middle/resistant bar
 
-
 # ec50 correlation analysis
 ec50_expr <- gene_expr_table %>%
   inner_join(tmz_meta, by = "cell_line") %>%   # tmz_meta has cell_line, ec50, group
@@ -488,7 +486,7 @@ anno_ec50 <- as.data.frame(anno_ec50)
 rownames(anno_ec50) <- anno_ec50$cell_line
 anno_ec50$cell_line <- NULL
 
-# top100 ec50 genes heatmap (ONLY chosen lines)
+# top100 ec50 genes heatmap
 heat_long_ec50 <- ec50_expr %>%
   filter(gene %in% top100_ec50_genes) %>%
   select(gene, cell_line, rna_expression) %>%
@@ -523,14 +521,14 @@ pheatmap(
 
 # ---------- look at ic50 patterns between sensitive and resistant
 
-# sensitivity genes: higher expression to lower IC50
+# sensitivity genes
 sensitivity_genes <- ic50_stats %>%
   filter(correlation < 0) %>%         
   arrange(correlation) %>%             
   slice_head(n = 50) %>%
   pull(gene)
 
-# resistance genes: higher expression to higher IC50
+# resistance genes
 resistance_genes <- ic50_stats %>%
   filter(correlation > 0) %>%          
   arrange(desc(correlation)) %>%       
@@ -541,25 +539,304 @@ resistance_genes <- ic50_stats %>%
 sens_mat <- heat_mat_ic50[rownames(heat_mat_ic50) %in% sensitivity_genes, ]
 res_mat  <- heat_mat_ic50[rownames(heat_mat_ic50) %in% resistance_genes, ]
 
-# heatmaps
+# plot heatmaps
+# sensitive
 pheatmap(
   sens_mat,
   annotation_col = anno_ic50_sub,
   cluster_rows = TRUE,
-  cluster_cols = TRUE,
+  cluster_cols = FALSE,
   show_rownames = TRUE,
-  show_colnames = FALSE,
+  show_colnames = TRUE,
   fontsize_row = 5,
-  main = "TMZ sensitivity-associated genes"
+  main = "TMZ sensitivity-associated genes (IC50)"
 )
 
+# resistant
 pheatmap(
   res_mat,
   annotation_col = anno_ic50_sub,
   cluster_rows = TRUE,
-  cluster_cols = TRUE,
+  cluster_cols = FALSE,
   show_rownames = TRUE,
-  show_colnames = FALSE,
+  show_colnames = TRUE,
   fontsize_row = 5,
-  main = "TMZ resistance-associated genes"
+  main = "TMZ resistance-associated genes (IC50)"
 )
+
+# ----- gene pathway enrichment analysis
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(limma)
+library(ggplot2)
+library(ggrepel)
+
+# keep only resistant and sensitive lines
+tmz_meta_de <- threshold_tbl %>%
+  filter(group %in% c("resistant", "sensitive")) %>%
+  mutate(cell_line = as.character(cell_line)) %>%
+  distinct(cell_line, .keep_all = TRUE)
+
+table(tmz_meta_de$group)
+
+# restrict expression to those lines
+expr_de_long <- gene_expr_table %>%
+  mutate(cell_line = as.character(cell_line)) %>%
+  inner_join(tmz_meta_de %>% select(cell_line, group), by = "cell_line") %>%
+  filter(!is.na(rna_expression))
+
+# filter gene expression
+expr_threshold <- 1
+
+expr_de_long <- expr_de_long %>%
+  filter(rna_expression > expr_threshold)
+
+# expression matrix
+#  rows = genes & columns = cell lines
+expr_de_wide <- expr_de_long %>%
+  select(gene, cell_line, rna_expression) %>%
+  group_by(gene, cell_line) %>%
+  summarise(rna_expression = mean(rna_expression, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from = cell_line,
+    values_from = rna_expression
+  )
+
+expr_de_df <- as.data.frame(expr_de_wide)
+rownames(expr_de_df) <- expr_de_df$gene
+expr_de_df$gene <- NULL
+
+expr_de_mat <- as.matrix(expr_de_df)
+
+# remove genes with any NA
+expr_de_mat <- expr_de_mat[complete.cases(expr_de_mat), , drop = FALSE]
+
+# remove zero-variance genes
+gene_sd <- apply(expr_de_mat, 1, sd, na.rm = TRUE)
+expr_de_mat <- expr_de_mat[gene_sd > 0 & is.finite(gene_sd), , drop = FALSE]
+
+dim(expr_de_mat)
+
+# vector and matrix
+group_vec <- tmz_meta_de$group
+names(group_vec) <- tmz_meta_de$cell_line
+
+# keep only shared cell lines
+common_cells <- intersect(colnames(expr_de_mat), names(group_vec))
+
+expr_de_mat <- expr_de_mat[, common_cells, drop = FALSE]
+group_vec <- group_vec[common_cells]
+
+# set factor order: sensitive first, resistant second
+group_vec <- factor(group_vec, levels = c("sensitive", "resistant"))
+
+table(group_vec)
+stopifnot(all(colnames(expr_de_mat) == names(group_vec)))
+
+# limma differential expression
+design <- model.matrix(~ 0 + group_vec)
+colnames(design) <- levels(group_vec)
+
+fit <- lmFit(expr_de_mat, design)
+
+contrast_matrix <- makeContrasts(
+  resistant - sensitive,
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2)
+
+de_results <- topTable(
+  fit2,
+  number = Inf,
+  adjust.method = "fdr",
+  sort.by = "P"
+)
+
+# gene annotations
+gene_annot <- gene_expr_table %>%
+  select(gene, entrez_id) %>%
+  distinct()
+
+de_results_annot <- de_results %>%
+  rownames_to_column("gene") %>%
+  left_join(gene_annot, by = "gene") %>%
+  select(gene, entrez_id, everything())
+
+head(de_results_annot)
+
+write.csv(
+  de_results_annot,
+  "temozolomide_resistant_vs_sensitive_DE.csv",
+  row.names = FALSE
+)
+
+#--------- plots
+
+volcano_df <- de_results_annot %>%
+  mutate(
+    negLog10P = -log10(P.Value),
+    key = case_when(
+      P.Value < 0.05 & logFC > 0 ~ "Up (Resistant)",
+      P.Value < 0.05 & logFC < 0 ~ "Down (Sensitive)",
+      TRUE ~ "Not significant"
+    )
+  )
+
+top_up <- volcano_df %>%
+  filter(logFC > 0) %>%
+  arrange(P.Value) %>%
+  slice_head(n = 5)
+
+top_down <- volcano_df %>%
+  filter(logFC < 0) %>%
+  arrange(P.Value) %>%
+  slice_head(n = 5)
+
+top10 <- bind_rows(top_up, top_down)
+
+
+ggplot(volcano_df, aes(x = logFC, y = negLog10P, color = key)) + 
+  geom_point(alpha = 0.7) + 
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") + 
+  geom_text_repel(
+    data = top10,
+    aes(label = gene),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(
+    name = NULL,
+    values = c(
+      "Up (Resistant)" = "red",
+      "Down (Sensitive)" = "blue",
+      "Not significant" = "grey"
+    )
+  ) + 
+  theme_minimal() + 
+  labs(
+    title = "Temozolomide DE: resistant vs sensitive",
+    x = "log2 fold change",
+    y = "-log10(p-value)"
+  )
+
+# ranked gene list for enrichment analysis
+gene_rank_t <- de_results$t
+names(gene_rank_t) <- rownames(de_results)
+
+gene_rank_t <- sort(gene_rank_t, decreasing = TRUE)
+
+# rank by signed
+gene_rank_signedp <- -log10(de_results$P.Value) * sign(de_results$logFC)
+names(gene_rank_signedp) <- rownames(de_results)
+
+gene_rank_signedp <- sort(gene_rank_signedp, decreasing = TRUE)
+
+# save
+write.csv(
+  data.frame(gene = names(gene_rank_t), score = gene_rank_t),
+  "tmz_ranked_genes_tstat.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  data.frame(gene = names(gene_rank_signedp), score = gene_rank_signedp),
+  "tmz_ranked_genes_signedlogp.csv",
+  row.names = FALSE
+)
+
+# pca plot
+# scale expression (important)
+expr_scaled <- scale(t(expr_de_mat))
+
+# run PCA
+pca <- prcomp(expr_scaled)
+
+# make dataframe
+pca_df <- data.frame(
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2],
+  group = group_vec
+)
+
+# plot
+ggplot(pca_df, aes(x = PC1, y = PC2, color = group)) +
+  geom_point(size = 3) +
+  
+  
+  scale_color_manual(
+    values = c(
+      "sensitive" = "blue",
+      "resistant" = "red"
+    )
+  ) +
+  
+  theme_minimal() +
+  labs(
+    title = "PCA: TMZ sensitive vs resistant")
+
+library(fgsea)
+library(msigdbr)
+library(dplyr)
+
+# pathways
+msig <- msigdbr(species = "Homo sapiens", collection = "H")
+pathways <- split(msig$gene_symbol, msig$gs_name)
+
+# ranked genes
+gene_ranks <- de_results$t
+names(gene_ranks) <- rownames(de_results)
+gene_ranks <- sort(gene_ranks, decreasing = TRUE)
+
+# run GSEA (correct way)
+fgsea_res <- fgsea(
+  pathways = pathways,
+  stats = gene_ranks
+)
+
+# sort results
+fgsea_res <- fgsea_res %>%
+  arrange(padj)
+
+head(fgsea_res)
+
+# dot plot
+# look at top 20 pathways
+plot_df <- fgsea_res %>%
+  filter(padj < 0.05) %>%       
+  arrange(padj) %>%
+  slice_head(n = 20)     
+
+# make annotation clean
+plot_df$pathway <- gsub("HALLMARK_", "", plot_df$pathway)
+plot_df$pathway <- gsub("_", " ", plot_df$pathway)
+
+# plot
+ggplot(plot_df, aes(x = NES, y = reorder(pathway, NES))) +
+  geom_point(aes(size = size, color = padj)) +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme_minimal() +
+  labs(
+    title = "GSEA pathway enrichment (TMZ)",
+    x = "Normalized Enrichment Score (NES)",
+    y = "Pathway",
+    color = "Adjusted p-value",
+    size = "Gene set size"
+  )
+
+# View leading edge genes for top pathways
+fgsea_res %>%
+  arrange(padj) %>%
+  select(pathway, leadingEdge) %>%
+  head()
+
+
+library(tidyr)
+library(dplyr)
+
+genes_per_pathway <- fgsea_res %>%
+  filter(padj < 0.05) %>%
+  select(pathway, leadingEdge) %>%
+  unnest(leadingEdge)
