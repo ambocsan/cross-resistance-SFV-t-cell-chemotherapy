@@ -421,38 +421,26 @@ for (drug in names(quadrant_results)) {
   
   df_drug <- quadrant_results[[drug]]
   
-  double_resistant <- df_drug %>%
-    filter(
-      quadrant == "High Viral / High Chemo"
-    ) %>%
+  # High Viral / High Chemo
+  viral_resistant_chemo_resistant <- df_drug %>%
+    filter(quadrant == "High Viral / High Chemo") %>%
     pull(ccle_name)
   
-  double_sensitive <- df_drug %>%
-    filter(
-      quadrant == "Low Viral / Low Chemo"
-    ) %>%
+  # Low Viral / High Chemo
+  viral_sensitive_chemo_resistant <- df_drug %>%
+    filter(quadrant == "Low Viral / High Chemo") %>%
     pull(ccle_name)
   
-  cat(
-    "Double resistant:",
-    length(double_resistant),
-    "\n"
-  )
-  
-  cat(
-    "Double sensitive:",
-    length(double_sensitive),
-    "\n"
-  )
+  cat("ChemoR ViralR:", length(viral_resistant_chemo_resistant), "\n")
+  cat("ChemoR ViralS:", length(viral_sensitive_chemo_resistant), "\n")
   
   cells_use <- intersect(
     colnames(gsva_scores),
     c(
-      double_resistant,
-      double_sensitive
+      viral_resistant_chemo_resistant,
+      viral_sensitive_chemo_resistant
     )
   )
-}
   
   if (length(cells_use) < 10)
     next
@@ -464,23 +452,23 @@ for (drug in names(quadrant_results)) {
   ]
   
   group <- ifelse(
-    cells_use %in% double_resistant,
-    "Resistant",
-    "Sensitive"
+    cells_use %in% viral_resistant_chemo_resistant,
+    "Viral_Resistant",
+    "Viral_Sensitive"
   )
   
   group <- factor(
     group,
     levels = c(
-      "Sensitive",
-      "Resistant"
+      "Viral_Sensitive",
+      "Viral_Resistant"
     )
   )
   
   if (length(unique(group)) < 2)
     next
   
-  design <- model.matrix(~ group)
+  design <- model.matrix(~group)
   
   fit <- lmFit(
     gsva_sub,
@@ -495,27 +483,25 @@ for (drug in names(quadrant_results)) {
   
   pathway_results <- topTable(
     fit,
-    coef = "groupResistant",
+    coef = "groupViral_Resistant",
     number = Inf,
     adjust.method = "BH"
   )
   
   pathway_results_list[[drug]] <- pathway_results
-
+  
   plot_df <- pathway_results %>%
-    rownames_to_column(
-      "Pathway"
-    ) %>%
+    rownames_to_column("Pathway") %>%
     mutate(
       neglogFDR = -log10(adj.P.Val),
       sig = adj.P.Val < 0.05,
-      direction = case_when(
-        logFC > 0 ~ "Double Resistant",
-        TRUE ~ "Double Sensitive"
+      direction = ifelse(
+        logFC > 0,
+        "ChemoR ViralR",
+        "ChemoR ViralS"
       )
     )
-
-# plot volcano plot  
+  
   volcano_plots[[drug]] <-
     ggplot(
       plot_df,
@@ -525,20 +511,14 @@ for (drug in names(quadrant_results)) {
       )
     ) +
     geom_point(
-      data = subset(
-        plot_df,
-        !sig
-      ),
-      color = "grey80",
+      data = subset(plot_df, !sig),
+      colour = "grey80",
       alpha = 0.6,
       size = 2
     ) +
     geom_point(
-      data = subset(
-        plot_df,
-        sig
-      ),
-      aes(color = direction),
+      data = subset(plot_df, sig),
+      aes(colour = direction),
       alpha = 0.85,
       size = 2.5
     ) +
@@ -550,50 +530,51 @@ for (drug in names(quadrant_results)) {
       yintercept = -log10(0.05),
       linetype = "dashed"
     ) +
-    scale_color_manual(
+    scale_colour_manual(
       values = c(
-        "Double Resistant" = "red",
-        "Double Sensitive" = "blue"
+        "ChemoR ViralR" = "red",
+        "ChemoR ViralS" = "blue"
       )
     ) +
     theme_bw() +
     labs(
       title = paste(
         drug,
-        "Double Resistant vs Double Sensitive"
+        "Chemo Resistant: Viral Resistant vs Viral Sensitive"
       ),
       x = "GSVA logFC",
       y = "-log10(FDR)"
     )
-
+  
+}
 
 # pooled cell lines across all chemotherapies
-all_double_resistant <- quadrant_results %>%
-  purrr::map(~ .x %>%
-               filter(quadrant == "High Viral / High Chemo") %>%
-               pull(ccle_name)) %>%
-  unlist() %>%
-  unique()
+  all_viral_resistant_chemo_resistant <- quadrant_results %>%
+    purrr::map(~ .x %>%
+                 filter(quadrant == "High Viral / High Chemo") %>%
+                 pull(ccle_name)) %>%
+    unlist() %>%
+    unique()
+  
+  all_viral_sensitive_chemo_resistant <- quadrant_results %>%
+    purrr::map(~ .x %>%
+                 filter(quadrant == "Low Viral / High Chemo") %>%
+                 pull(ccle_name)) %>%
+    unlist() %>%
+    unique()
 
-all_double_sensitive <- quadrant_results %>%
-  purrr::map(~ .x %>%
-               filter(quadrant == "Low Viral / Low Chemo") %>%
-               pull(ccle_name)) %>%
-  unlist() %>%
-  unique()
-
-length(all_double_resistant)
-length(all_double_sensitive)
+length(all_viral_resistant_chemo_resistant)
+length(all_viral_sensitive_chemo_resistant)
 
 # gsva analysis on pooled groups
 cells_use <- intersect(
   colnames(gsva_scores),
-  c(all_double_resistant,
-    all_double_sensitive)
+  c(all_viral_resistant_chemo_resistant,
+    all_viral_sensitive_chemo_resistant)
 )
 
 group <- ifelse(
-  cells_use %in% all_double_resistant,
+  cells_use %in% all_viral_resistant_chemo_resistant,
   "Resistant",
   "Sensitive"
 )
@@ -603,7 +584,12 @@ group <- factor(
   levels = c("Sensitive","Resistant")
 )
 
-gsva_sub <- gsva_scores[, cells_use]
+gsva_sub <- gsva_scores[, cells_use, drop = FALSE]
+
+dim(gsva_scores)
+dim(gsva_sub)
+length(cells_use)
+identical(colnames(gsva_sub), cells_use)
 
 design <- model.matrix(~ group)
 
@@ -623,15 +609,15 @@ pooled_results <- topTable(
   rownames_to_column("Pathway")
 
 # double resistant
-double_resistant_table <- pooled_results %>%
+all_viral_resistant_chemo_resistant_table <- pooled_results %>%
   filter(
     adj.P.Val < 0.05,
     logFC > 0
   ) %>%
   arrange(desc(logFC))
 
-# double sensitive
-double_sensitive_table <- pooled_results %>%
+# viral sensitive
+all_viral_sensitive_chemo_resistant_table <- pooled_results %>%
   filter(
     adj.P.Val < 0.05,
     logFC < 0
@@ -700,7 +686,7 @@ write.csv(
 
 write.csv(
   viral_down_pathways,
-  "viral_pathways_up_in_double_sensitive.csv",
+  "viral_pathways_up_in_viral_sensitive.csv",
   row.names = FALSE
 )
 
@@ -712,7 +698,7 @@ double_resistant_viral <- viral_results %>%
   ) %>%
   arrange(desc(logFC))
 
-double_sensitive_viral <- viral_results %>%
+viral_sensitive_viral <- viral_results %>%
   filter(
     adj.P.Val < 0.05,
     logFC < 0
@@ -726,7 +712,7 @@ plot_df_double <- pooled_results %>%
     sig = adj.P.Val < 0.05,
     direction = case_when(
       logFC > 0 ~ "Double Resistant",
-      TRUE ~ "Double Sensitive"
+      TRUE ~ "Viral Sensitive"
     )
   )
 
@@ -785,7 +771,7 @@ ggplot(
   scale_colour_manual(
     values = c(
       "Double Resistant" = "red",
-      "Double Sensitive" = "blue"
+      "Viral Sensitive" = "blue"
     )
   ) +
   
@@ -793,7 +779,7 @@ ggplot(
   
   labs(
     title = "Pathway distribution",
-    subtitle = "Double Resistant vs Double Sensitive across all chemotherapies",
+    subtitle = "Double Resistant vs Viral Sensitive across all chemotherapies",
     x = "GSVA logFC",
     y = "-log10(FDR)"
   )
@@ -813,21 +799,30 @@ viral_plot %>%
 viral_plot %>%
   arrange(desc(logFC)) %>%
   select(Pathway, Pathway_clean, logFC, adj.P.Val) %>%
-  head(20)
+  head(10)
 
 # most enriched in Double Sensitive
 viral_plot %>%
   arrange(logFC) %>%
   select(Pathway, Pathway_clean, logFC, adj.P.Val) %>%
-  head(20)
+  head(10)
 
 # plot pathways
-plot_df <- viral_plot %>%
+plot_df <- bind_rows(
+  viral_plot %>%
+    arrange(desc(logFC)) %>%
+    slice_head(n = 10),
+  
+  viral_plot %>%
+    arrange(logFC) %>%
+    slice_head(n = 10)
+) %>%
+  distinct(Pathway, .keep_all = TRUE) %>%
   mutate(
     Direction = ifelse(
       logFC > 0,
       "Double Resistant",
-      "Double Sensitive"
+      "Viral Sensitive"
     )
   ) %>%
   arrange(logFC)
@@ -849,19 +844,20 @@ ggplot(
   scale_fill_manual(
     values = c(
       "Double Resistant" = "firebrick",
-      "Double Sensitive" = "steelblue"
+      "Viral Sensitive" = "steelblue"
     )
   ) +
   theme_bw() +
   theme(
     panel.grid.major.y = element_blank(),
-    panel.grid.minor = element_blank()
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 6)
   ) +
   labs(
     x = NULL,
     y = "GSVA logFC",
     title = "Viral-associated pathway enrichment",
-    subtitle = "Top 20 pathways: double resistant vs double sensitive"
+    subtitle = "Top 20 pathways: double resistant vs viral sensitive"
   )
 
 # viral genes
@@ -896,14 +892,14 @@ viral_genes <- c(
   "IDO1"
 )
 
-#r resistant and sensitive cell lines
+# resistant and sensitive cell lines
 res_cells <- intersect(
-  all_double_resistant,
+  all_viral_resistant_chemo_resistant,
   unique(expr_filtered$cell_line)
 )
 
 sens_cells <- intersect(
-  all_double_sensitive,
+  all_viral_sensitive_chemo_resistant,
   unique(expr_filtered$cell_line)
 )
 
@@ -914,7 +910,7 @@ cat(
 )
 
 cat(
-  "Double Sensitive:",
+  "Viral Sensitive:",
   length(sens_cells),
   "\n"
 )
@@ -1053,7 +1049,7 @@ viral_genes <- unique(
     Reduce(
       "|",
       lapply(
-        viral_patterns,
+        viral_genes,
         function(x)
           grepl(
             x,
@@ -1097,12 +1093,12 @@ cat(
 
 # resisant and sensitive cell lines
 res_cells <- intersect(
-  all_double_resistant,
+  all_viral_resistant_chemo_resistant,
   unique(expr_filtered$cell_line)
 )
 
 sens_cells <- intersect(
-  all_double_sensitive,
+  all_viral_sensitive_chemo_resistant,
   unique(expr_filtered$cell_line)
 )
 
@@ -1323,9 +1319,9 @@ pheatmap(
   heat_mat,
   color = colorRampPalette(
     c(
-      "navy",
+      "purple",
       "white",
-      "firebrick"
+      "gold"
     )
   )(100),
   cluster_rows = TRUE,
@@ -1337,7 +1333,7 @@ pheatmap(
   annotation_colors = annotation_colors,
   border_color = NA,
   main =
-    "GSVA Viral Pathway Genes\nDouble Sensitive vs Double Resistant"
+    "GSVA Viral Pathway Genes\nViral Sensitive vs Double Resistant"
 )
 
 # view tables
@@ -1376,25 +1372,25 @@ write.csv(
 )
 
 write.csv(
-  double_resistant_table,
+  viral_resistant_table,
   "double_resistant_pathways.csv",
   row.names = FALSE
 )
 
 write.csv(
-  double_sensitive_table,
-  "double_sensitive_pathways.csv",
+  viral_sensitive_table,
+  "viral_sensitive_pathways.csv",
   row.names = FALSE
 )
 
 write.csv(
-  double_resistant_viral,
+  viral_resistant_chemo_resistant,
   "double_resistant_viral_pathways.csv",
   row.names = FALSE
 )
 
 write.csv(
-  double_sensitive_viral,
+  viral_sensitive_chemo_resistant,
   "double_sensitive_viral_pathways.csv",
   row.names = FALSE
 )
